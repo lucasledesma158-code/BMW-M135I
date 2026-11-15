@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BMW M135i N55 - Monitor OBD Bluetooth</title>
+  <style>
+    body {
+      background-color: #0b0d10;
+      color: #ffffff;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      margin: 0;
+      padding: 15px;
+    }
+    h1 { color: #00a8ff; letter-spacing: 1px; margin: 0 0 5px 0; font-size: 24px; text-align: center; }
+    p.sub { color: #8892b0; margin: 0 0 20px 0; font-size: 14px; text-align: center; }
+    .gauges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 20px;
+      justify-content: center;
+      width: 100%;
+      max-width: 820px;
+    }
+    .card {
+      background: #161b22;
+      border: 2px solid #30363d;
+      border-radius: 16px;
+      padding: 25px;
+      width: 280px;
+      text-align: center;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.6);
+    }
+    .card.m-sport { border-top: 5px solid #0066b1; }
+    .card.turbo { border-top: 5px solid #e11d48; }
+    .label { font-size: 14px; text-transform: uppercase; color: #8b949e; letter-spacing: 1.5px; }
+    .value { font-size: 64px; font-weight: bold; margin: 10px 0; font-variant-numeric: tabular-nums; }
+    .unit { font-size: 18px; color: #58a6ff; font-weight: bold; }
+    .bar-bg { background: #21262d; height: 14px; border-radius: 7px; overflow: hidden; margin-top: 15px; }
+    .bar-fill { height: 100%; width: 0%; transition: width 0.08s linear; }
+    #rpm-bar { background: linear-gradient(90deg, #00a8ff, #f59e0b, #ef4444); }
+    #boost-bar { background: linear-gradient(90deg, #10b981, #e11d48); }
+    .controls { margin-top: 25px; display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; }
+    button {
+      background: #238636;
+      color: white;
+      border: none;
+      padding: 14px 24px;
+      border-radius: 10px;
+      font-size: 16px;
+      cursor: pointer;
+      font-weight: bold;
+    }
+    button.demo { background: #1f6feb; }
+    .status { width: 100%; text-align: center; font-size: 13px; color: #8b949e; margin-top: 12px; }
+  </style>
+</head>
+<body>
+
+  <h1>BMW M135i • N55 EWG</h1>
+  <p class="sub">MHD Stage 2 • Telemetría en Vivo OBD2</p>
+
+  <div class="gauges">
+    <div class="card m-sport">
+      <div class="label">Revoluciones</div>
+      <div class="value" id="rpm-val">0</div>
+      <div class="unit">RPM</div>
+      <div class="bar-bg"><div class="bar-fill" id="rpm-bar"></div></div>
+    </div>
+
+    <div class="card turbo">
+      <div class="label">Presión Turbo</div>
+      <div class="value" id="boost-val">0.0</div>
+      <div class="unit">PSI</div>
+      <div class="bar-bg"><div class="bar-fill" id="boost-bar"></div></div>
+    </div>
+  </div>
+
+  <div class="controls">
+    <button onclick="conectarOBD()">Conectar OBD Bluetooth</button>
+    <button class="demo" onclick="iniciarDemo()">Probar Demo</button>
+    <div class="status" id="status-text">Listo para conectar al puerto OBD2</div>
+  </div>
+
+  <script>
+    let obdCharWrite = null;
+    let buffer = "";
+    let baroKpa = 101;
+    let demoInt;
+
+    function actualizarRelojes(rpm, boost) {
+      document.getElementById('rpm-val').innerText = Math.round(rpm);
+      document.getElementById('boost-val').innerText = boost.toFixed(1);
+      document.getElementById('rpm-bar').style.width = Math.min((rpm / 7000) * 100, 100) + '%';
+      document.getElementById('boost-bar').style.width = Math.min((Math.max(boost, 0) / 22) * 100, 100) + '%';
+    }
+
+    async function conectarOBD() {
+      clearInterval(demoInt);
+      const status = document.getElementById('status-text');
+      if (!navigator.bluetooth) {
+        status.innerText = "Este navegador no soporta Web Bluetooth. Usa Google Chrome.";
+        return;
+      }
+      try {
+        status.innerText = "Buscando adaptador OBD Bluetooth...";
+        const device = await navigator.bluetooth.requestDevice({
+          acceptAllDevices: true,
+          optionalServices: [
+            '0000fff0-0000-1000-8000-00805f9b34fb',
+            '0000ffe0-0000-1000-8000-00805f9b34fb',
+            'e7810a71-73ae-499d-8c15-faa9aef0c3f2'
+          ]
+        });
+        status.innerText = "Conectando a " + (device.name || "OBD2") + "...";
+        const server = await device.gatt.connect();
+        const services = await server.getPrimaryServices();
+        for (const service of services) {
+          const chars = await service.getCharacteristics();
+          for (const c of chars) {
+            if (c.properties.notify) {
+              await c.startNotifications();
+              c.addEventListener('characteristicvaluechanged', recibirDatos);
+            }
+            if (c.properties.write || c.properties.writeWithoutResponse) {
+              obdCharWrite = c;
+            }
+          }
+        }
+        if (obdCharWrite) {
+          status.innerText = "Conectado en vivo a " + (device.name || "BMW N55");
+          await enviarComando("ATZ\r");
+          setTimeout(() => enviarComando("ATE0\r"), 500);
+          setTimeout(() => enviarComando("ATSP0\r"), 900);
+          setTimeout(() => loopLectura(), 1400);
+        }
+      } catch (err) {
+        status.innerText = "Error: " + err.message;
+      }
+    }
+
+    async function enviarComando(cmd) {
+      if (!obdCharWrite) return;
+      const encoder = new TextEncoder();
+      await obdCharWrite.writeValue(encoder.encode(cmd));
+    }
+
+    function recibirDatos(event) {
+      const decoder = new TextDecoder();
+      buffer += decoder.decode(event.target.value);
+      if (buffer.includes('>')) {
+        procesarRespuesta(buffer);
+        buffer = "";
+      }
+    }
+
+    let rpmActual = 0;
+    let boostActual = 0;
+
+    function procesarRespuesta(resp) {
+      const clean = resp.replace(/\s+/g, '').toUpperCase();
+      if (clean.includes('410C')) {
+        const idx = clean.indexOf('410C');
+        const hex = clean.substr(idx + 4, 4);
+        if (hex.length === 4) {
+          rpmActual = parseInt(hex, 16) / 4;
+          actualizarRelojes(rpmActual, boostActual);
+        }
+      }
+      if (clean.includes('410B')) {
+        const idx = clean.indexOf('410B');
+        const hex = clean.substr(idx + 4, 2);
+        if (hex.length === 2) {
+          const mapKpa = parseInt(hex, 16);
+          boostActual = (mapKpa - baroKpa) * 0.145038;
+          actualizarRelojes(rpmActual, boostActual);
+        }
+      }
+    }
+
+    let turno = 0;
+    function loopLectura() {
+      setInterval(() => {
+        if (turno === 0) {
+          enviarComando("010C1\r");
+          turno = 1;
+        } else {
+          enviarComando("010B1\r");
+          turno = 0;
+        }
+      }, 110);
+    }
+
+    function iniciarDemo() {
+      clearInterval(demoInt);
+      let rpm = 1100, boost = -4.5;
+      document.getElementById('status-text').innerText = "Modo Demo Stage 2 activo...";
+      demoInt = setInterval(() => {
+        rpm += 150;
+        boost = rpm < 2500 ? (rpm - 2000) / 200 : Math.min(18.5, (rpm - 2200) / 180);
+        actualizarRelojes(rpm, boost);
+        if (rpm >= 6800) {
+          clearInterval(demoInt);
+          document.getElementById('status-text').innerText = "Demo finalizada.";
+        }
+      }, 60);
+    }
+  </script>
+</body>
+</html>
